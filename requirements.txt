@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+langchain
+langchain-anthropic
+langchain-community
+chromadb
+sentence-transformers
+pymupdf
+python-dotenv
+anthropic
+ragas
+deepeval
+langfuse
+pydantic
