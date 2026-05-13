@@ -105,6 +105,7 @@ class PolicyResponse(BaseModel):
     confidence_percent:  float
     confidence_label:    str
     pathway:             str
+    pdf_url:             str
     timestamp:           str
     disclaimer:          str
 
@@ -210,17 +211,21 @@ async def ask_question(
         )
 
     confidence_data = normalise_confidence(result.get("confidence", 0.0))
+    pdf_file = result.get("pdf_file", "")
+    page     = result.get("page", "")
+    pdf_url  = f"/policies/{pdf_file}#page={page}" if pdf_file else ""
 
     return {
         "answer":             result["answer"],
         "source":             result.get("source", ""),
         "reference":          result.get("reference", ""),
-        "page":               result.get("page", ""),
+        "page":               page,
         "version":            result.get("version", ""),
         "confidence_score":   result.get("confidence", 0.0),
         "confidence_percent": confidence_data["percentage"],
         "confidence_label":   confidence_data["label"],
         "pathway":            result.get("pathway", ""),
+        "pdf_url":            pdf_url,
         "timestamp":          datetime.now().isoformat(),
         "disclaimer": (
             "This guidance is based on UHP policy documents. "

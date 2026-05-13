@@ -495,6 +495,7 @@ def query_policies(question: str) -> dict:
         "version":    primary_meta.get("version", ""),
         "confidence": round(confidence, 3),
         "pathway":    primary_meta.get("pathway", ""),
+        "pdf_file":   primary_meta.get("pdf_file", ""),
         "error":      False
     }
 

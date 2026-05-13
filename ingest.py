@@ -24,6 +24,7 @@ DOCUMENT_REGISTRY = {
         "review_date":      "April 2026",
         "department":       "Digital & Innovation",
         "pathway":          "Pathway 1",
+        "pdf_file":         "ai_policy.pdf",
     },
     "TRW.IGT.POL.139.7-Information-Security-Policy.pdf": {
         "doc_title":        "Information Security Policy",
@@ -33,6 +34,7 @@ DOCUMENT_REGISTRY = {
         "review_date":      "October 2029",
         "department":       "Digital & Innovation",
         "pathway":          "Pathway 1",
+        "pdf_file":         "info_security.pdf",
     },
     "TRW.IGT.POL.373.6.1-Information-Governance-Policy.pdf": {
         "doc_title":        "Information Governance Policy",
@@ -42,6 +44,7 @@ DOCUMENT_REGISTRY = {
         "review_date":      "January 2029",
         "department":       "Information Governance",
         "pathway":          "Pathway 1",
+        "pdf_file":         "info_governance.pdf",
     },
     "TRW.HGV.POL.1467.2-Patient-Safety-Incident-Response.pdf": {
         "doc_title":        "Patient Safety Incident Response Policy",
@@ -51,6 +54,7 @@ DOCUMENT_REGISTRY = {
         "review_date":      "May 2029",
         "department":       "Healthcare Governance",
         "pathway":          "Pathway 2",
+        "pdf_file":         "patient_safety.pdf",
     },
     "TRW.CRM.POL.103.5-Data-Quality-Policy.pdf": {
         "doc_title":        "Data Quality Policy",
@@ -60,6 +64,7 @@ DOCUMENT_REGISTRY = {
         "review_date":      "October 2027",
         "department":       "Clinical Records Management",
         "pathway":          "Pathway 1",
+        "pdf_file":         "data_quality.pdf",
     },
 }
 
@@ -145,6 +150,7 @@ def chunk_documents(documents: list[dict]) -> tuple[list, list]:
                     "review_date":      page_data.get("review_date", ""),
                     "department":       page_data.get("department", ""),
                     "pathway":          page_data.get("pathway", ""),
+                    "pdf_file":         page_data.get("pdf_file", ""),
 
                     # Audit fields
                     "ingested_at":      page_data.get("ingested_at", ""),
