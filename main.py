@@ -213,7 +213,7 @@ async def ask_question(
     confidence_data = normalise_confidence(result.get("confidence", 0.0))
     pdf_file = result.get("pdf_file", "")
     page     = result.get("page", "")
-    pdf_url  = f"/policies/{pdf_file}#page={page}" if pdf_file else ""
+    pdf_url  = f"/policies/{pdf_file}#page={page}" if pdf_file and page else ""
 
     return {
         "answer":             result["answer"],

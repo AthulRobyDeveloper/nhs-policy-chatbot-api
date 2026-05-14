@@ -504,7 +504,7 @@ def collect_rag_outputs(test_set: list) -> dict:
             result      = query_policies(question)
             answer      = result.get("answer", "")
             rewritten   = rewrite_query(question)
-            docs        = hybrid_search(rewritten)
+            docs        = hybrid_search(original=question, rewritten=rewritten)
             top_docs, _ = rerank(question, docs)
             chunk_texts = [doc.page_content for doc in top_docs]
 

@@ -43,6 +43,11 @@ STRICT RULES — NEVER VIOLATE:
    For critical decisions always verify with the original
    policy or your line manager. Human judgement must
    prevail over AI guidance."
+8. If the question asks for ALL items, ALL methods, a
+   COMPLETE LIST, or a FULL SUMMARY, always end with:
+   "📄 Note: This answer is based on retrieved sections
+   of the policy. For complete information please view
+   the full document using the citation link below."
 
 FORMAT YOUR RESPONSE AS:
 Answer: [your answer here]
@@ -224,40 +229,27 @@ def classify_pathway(query: str, metadata: dict) -> str:
 
 
 # ─── HYBRID SEARCH ────────────────────────────────────────────
-def hybrid_search(question: str) -> list:
+def hybrid_search(original: str, rewritten: str = None) -> list:
     """
-    Two-stage hybrid retrieval:
-
-    Stage 1 — Hybrid search (BM25 + semantic):
-    - BM25 keyword search catches exact NHS terms
-      (DCB0129, DTAC, TDA, Caldicott Guardian)
-    - Semantic search catches conceptual meaning
-    - Combined score: 40% BM25 + 60% semantic
-    - Returns top 20 candidates
-
-    Why hybrid for NHS:
-    NHS documents contain many acronyms that
-    semantic search alone misses. BM25 finds
-    exact term matches reliably.
+    BM25 uses the original query to preserve exact NHS terms
+    (DCB0129, TDA, ChatGPT). Semantic uses the rewritten query
+    for expanded NHS terminology. Separate queries per signal
+    gives the best of both.
     """
-    # BM25 scores
-    bm25_scores = _bm25.get_scores(question.lower().split())
+    bm25_scores = _bm25.get_scores(original.lower().split())
     max_bm25    = max(bm25_scores) if max(bm25_scores) > 0 else 1
 
-    # Semantic scores
+    semantic_query   = rewritten if rewritten else original
     semantic_results = _vectorstore.similarity_search_with_score(
-        question, k=TOP_K_RETRIEVE
+        semantic_query, k=TOP_K_RETRIEVE
     )
     semantic_lookup = {
         doc.page_content: float(1 - score)
         for doc, score in semantic_results
     }
 
-    # Combine scores
     combined = []
-    for i, (text, meta) in enumerate(
-        zip(_all_texts, _all_metas)
-    ):
+    for i, (text, meta) in enumerate(zip(_all_texts, _all_metas)):
         bm25_norm      = float(bm25_scores[i]) / max_bm25
         semantic_score = semantic_lookup.get(text, 0.0)
         combined_score = (0.2 * bm25_norm) + (0.8 * semantic_score)
@@ -288,6 +280,17 @@ def rerank(question: str, docs: list) -> tuple[list, float]:
     return top_docs, top_score
 
 
+# ─── LONG CONTEXT REORDER ─────────────────────────────────────
+def reorder_for_llm(docs: list) -> list:
+    """
+    Reorder chunks to fix 'Lost in the Middle' problem.
+    LLMs best retain content at the start and end of context;
+    placing the most relevant chunks there improves answer quality.
+    """
+    from langchain_community.document_transformers import LongContextReorder
+    return LongContextReorder().transform_documents(docs)
+
+
 # ─── FORMAT CONTEXT ───────────────────────────────────────────
 def format_context(docs: list) -> tuple[str, dict]:
     """
@@ -297,11 +300,16 @@ def format_context(docs: list) -> tuple[str, dict]:
     """
     parts        = []
     primary_meta = {}
+    all_pages    = []
 
     for i, doc in enumerate(docs, 1):
         meta = doc.metadata
         if i == 1:
             primary_meta = meta
+
+        page = meta.get("page")
+        if page:
+            all_pages.append(page)
 
         parts.append(
             f"[Source {i}]\n"
@@ -313,7 +321,7 @@ def format_context(docs: list) -> tuple[str, dict]:
             f"Content:\n{doc.page_content}\n"
         )
 
-    return "\n---\n".join(parts), primary_meta
+    return "\n---\n".join(parts), primary_meta, all_pages
 
 
 # ─── OUTPUT VALIDATOR ─────────────────────────────────────────
@@ -417,10 +425,10 @@ def query_policies(question: str) -> dict:
         return {"answer": str(e), "source": "N/A", "error": True}
 
     # Step 1b: Rewrite query into NHS policy terminology
-    search_query = rewrite_query(question)
+    rewritten = rewrite_query(question)
 
-    # Step 2: Hybrid search with rewritten query
-    docs = hybrid_search(search_query)
+    # Step 2: Hybrid search — BM25 on original, semantic on rewritten
+    docs = hybrid_search(original=question, rewritten=rewritten)
 
     if not docs:
         return {
@@ -437,8 +445,11 @@ def query_policies(question: str) -> dict:
     # Step 3: Rerank
     top_docs, confidence = rerank(question, docs)
 
+    # Step 3b: Reorder for LLM context window
+    top_docs = reorder_for_llm(top_docs)
+
     # Step 4: Format context
-    context, primary_meta = format_context(top_docs)
+    context, primary_meta, all_pages = format_context(top_docs)
 
     # Step 5: Review date check
     review_warning = check_review_status(primary_meta)
@@ -491,7 +502,7 @@ def query_policies(question: str) -> dict:
         "answer":     answer_text,
         "source":     primary_meta.get("doc_title", ""),
         "reference":  primary_meta.get("policy_reference", ""),
-        "page":       extract_page_from_answer(answer_text, primary_meta.get("page", "")),
+        "page":       extract_page_from_answer(answer_text, all_pages[0] if all_pages else primary_meta.get("page", "")),
         "version":    primary_meta.get("version", ""),
         "confidence": round(confidence, 3),
         "pathway":    primary_meta.get("pathway", ""),
