@@ -1,9 +1,13 @@
 import os
 import re
+import json
+import math
 import hashlib
 import sqlite3
 from datetime import datetime
 from dotenv import load_dotenv
+
+from langfuse import Langfuse, observe
 
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
@@ -14,6 +18,13 @@ from sentence_transformers import CrossEncoder
 from rank_bm25 import BM25Okapi
 
 load_dotenv()
+
+# ─── LANGFUSE SETUP ───────────────────────────────────────────
+langfuse = Langfuse(
+    secret_key = os.getenv("LANGFUSE_SECRET_KEY"),
+    public_key = os.getenv("LANGFUSE_PUBLIC_KEY"),
+    host       = os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
+)
 
 # ─── CONFIGURATION ────────────────────────────────────────────
 CHROMA_DIR     = "chroma_db"
@@ -357,65 +368,133 @@ def validate_output(response: str) -> str:
 
 
 # ─── PAGE EXTRACTOR ───────────────────────────────────────────
-def extract_page_from_answer(answer_text: str, fallback) -> any:
+def extract_page_from_answer(answer_text: str, all_pages: list, fallback="") -> any:
     """
-    Extract page number cited by LLM in its response.
-    More accurate than primary_meta page, which reflects
-    the top reranked chunk rather than the cited source.
+    Extract page from LLM answer text first.
+    If not cited, return lowest page number (start of content).
     """
     match = re.search(r'Page:\s*(\d+)', answer_text)
     if match:
         return int(match.group(1))
+    numeric = [p for p in all_pages if isinstance(p, int)]
+    if numeric:
+        return min(numeric)
     return fallback
 
 
-# ─── QUERY REWRITER ───────────────────────────────────────────
-def rewrite_query(question: str) -> str:
+# ─── QUERY ANALYSER ───────────────────────────────────────────
+def analyse_and_rewrite(question: str) -> dict:
     """
-    Rewrite user query into formal NHS policy terminology.
+    Single LLM call that classifies query type AND rewrites it.
 
-    Staff use informal language; policy documents use formal NHS
-    terms. This gap causes retrieval failures even when the answer
-    exists (e.g. staff ask about "ChatGPT", documents say "Copilot"
-    and "generative AI"). LLM bridges this automatically — no
-    hardcoded synonyms, adapts to any query.
+    Classifies SPECIFIC (one fact/definition/process) vs BROAD
+    (complete list, all methods, full summary). BROAD queries
+    route to RAG Fusion for wider coverage; SPECIFIC queries use
+    faster hybrid search.
+
+    One call instead of two saves latency and cost.
+    No hardcoded keywords — LLM decides for any phrasing.
     """
     llm = ChatAnthropic(
         model="claude-haiku-4-5",
         api_key=os.getenv("ANTHROPIC_API_KEY"),
-        max_tokens=100,
+        max_tokens=200,
         temperature=0
     )
     prompt = (
-        "Rewrite this question using formal NHS policy document "
-        "terminology to improve document search.\n"
-        "Keep the same meaning but use terms likely found in NHS "
-        "policy documents.\n"
-        "Return ONLY the rewritten query, nothing else.\n\n"
-        f"Question: {question}\n"
-        "Rewritten:"
+        'Classify this NHS policy question and rewrite it.\n\n'
+        'IMPORTANT: Keep these terms EXACTLY unchanged: '
+        'DCB0129, DCB0160, DTAC, TDA, CDA, DPIA, PSIRF, GDPR, NHS, UHP, IG\n\n'
+        f'Question: {question}\n\n'
+        'Respond with ONLY this JSON, nothing else:\n'
+        '{{\n'
+        '  "query_type": "SPECIFIC or BROAD",\n'
+        '  "rewritten": "rewritten query using formal NHS terminology"\n'
+        '}}\n\n'
+        'SPECIFIC = ONE definition, ONE requirement, ONE process step, ONE named role\n'
+        'BROAD = policy overview, guidelines, what staff should/should not do,\n'
+        '        "what is the policy on X", complete list, all methods, full summary\n\n'
+        'JSON:'
     )
-    response  = llm.invoke([HumanMessage(content=prompt)])
-    rewritten = response.content.strip()
-    print(f"  Query rewritten: {rewritten}")
-    return rewritten
+    response = llm.invoke([HumanMessage(content=prompt)])
+    try:
+        text       = response.content.strip().replace("```json", "").replace("```", "")
+        result     = json.loads(text)
+        use_fusion = result.get("query_type", "SPECIFIC") == "BROAD"
+        print(f"  Query type: {result.get('query_type')}  |  fusion: {use_fusion}")
+        print(f"  Rewritten:  {result.get('rewritten', '')[:80]}...")
+        return {
+            "query_type": result.get("query_type", "SPECIFIC"),
+            "rewritten":  result.get("rewritten", question),
+            "use_fusion": use_fusion,
+        }
+    except Exception:
+        return {
+            "query_type": "SPECIFIC",
+            "rewritten":  question,
+            "use_fusion": False,
+            "reason":     "fallback — JSON parse failed"
+        }
+
+
+# ─── RAG FUSION SEARCH ────────────────────────────────────────
+def rag_fusion_search(question: str) -> list:
+    """
+    RAG Fusion for broad/list queries.
+
+    Generates 4 query variations from the original question,
+    searches with each, then merges using Reciprocal Rank
+    Fusion (RRF). RRF rewards chunks that rank highly across
+    multiple variations — more robust than single-query search.
+    """
+    llm = ChatAnthropic(
+        model="claude-haiku-4-5",
+        api_key=os.getenv("ANTHROPIC_API_KEY"),
+        max_tokens=300,
+        temperature=0.3
+    )
+    variation_prompt = (
+        "Generate 4 different search queries to find comprehensive "
+        "information about the following question in NHS policy documents.\n"
+        "Each query should approach the topic from a different angle.\n"
+        "Return ONLY 4 queries, one per line, nothing else.\n\n"
+        f"Question: {question}\n\nQueries:"
+    )
+    response   = llm.invoke([HumanMessage(content=variation_prompt)])
+    variations = [v.strip() for v in response.content.strip().split("\n") if v.strip()][:4]
+    variations.append(question)  # always include original
+    print(f"  RAG Fusion variations: {len(variations)}")
+
+    # Search with each variation, collect ranked results
+    all_rankings: dict[str, list[int]] = {}
+    all_docs:     dict[str, Document]  = {}
+
+    for variation in variations:
+        results = _vectorstore.similarity_search(variation, k=TOP_K_RETRIEVE)
+        for rank, doc in enumerate(results):
+            key = doc.page_content
+            if key not in all_rankings:
+                all_rankings[key] = []
+                all_docs[key]     = doc
+            all_rankings[key].append(rank)
+
+    # Reciprocal Rank Fusion — RRF score = sum(1 / (60 + rank))
+    rrf_scores = {
+        key: sum(1.0 / (60 + r) for r in ranks)
+        for key, ranks in all_rankings.items()
+    }
+
+    sorted_keys = sorted(rrf_scores, key=lambda k: rrf_scores[k], reverse=True)
+    return [all_docs[k] for k in sorted_keys[:TOP_K_RETRIEVE]]
 
 
 # ─── MAIN QUERY FUNCTION ──────────────────────────────────────
+@observe()
 def query_policies(question: str) -> dict:
     """
-    Main RAG pipeline:
-
-    1.  Sanitise input (prompt injection prevention)
-    2.  Hybrid search — BM25 + semantic top 20
-    3.  Rerank — cross-encoder top 5
-    4.  Format context with NHS metadata
-    5.  Check review dates
-    6.  Classify pathway (1 or 2)
-    7.  Generate grounded response (temperature=0)
-    8.  Validate output
-    9.  Audit log (GDPR compliant — hash only)
-    10. Return response + full metadata
+    Main RAG pipeline with Langfuse tracing.
+    Every query traced with input, routing decision,
+    source, confidence, latency per step.
     """
 
     # Step 1: Sanitise
@@ -424,11 +503,16 @@ def query_policies(question: str) -> dict:
     except ValueError as e:
         return {"answer": str(e), "source": "N/A", "error": True}
 
-    # Step 1b: Rewrite query into NHS policy terminology
-    rewritten = rewrite_query(question)
+    # Step 2: Analyse + rewrite
+    analysis = analyse_and_rewrite(question)
 
-    # Step 2: Hybrid search — BM25 on original, semantic on rewritten
-    docs = hybrid_search(original=question, rewritten=rewritten)
+    # Step 3: Route retrieval
+    if analysis.get("use_fusion"):
+        print("  Strategy: RAG Fusion")
+        docs = rag_fusion_search(question)
+    else:
+        print("  Strategy: Hybrid search")
+        docs = hybrid_search(original=question, rewritten=analysis.get("rewritten", question))
 
     if not docs:
         return {
@@ -442,27 +526,25 @@ def query_policies(question: str) -> dict:
             "error":  False
         }
 
-    # Step 3: Rerank
+    # Step 4: Rerank + reorder
     top_docs, confidence = rerank(question, docs)
-
-    # Step 3b: Reorder for LLM context window
+    top_meta = top_docs[0].metadata if top_docs else {}
     top_docs = reorder_for_llm(top_docs)
 
-    # Step 4: Format context
-    context, primary_meta, all_pages = format_context(top_docs)
+    # Step 5: Format context
+    context, _, all_pages = format_context(top_docs)
+    primary_meta = top_meta
 
-    # Step 5: Review date check
-    review_warning = check_review_status(primary_meta)
-
-    # Step 6: Pathway classification
+    # Step 6: NHS-specific warnings
+    review_warning  = check_review_status(primary_meta)
     pathway_warning = classify_pathway(question, primary_meta)
 
     # Step 7: Generate response
     llm = ChatAnthropic(
-        model="claude-haiku-4-5",
-        api_key=os.getenv("ANTHROPIC_API_KEY"),
-        max_tokens=1000,
-        temperature=0  # deterministic — critical for NHS
+        model      = "claude-haiku-4-5",
+        api_key    = os.getenv("ANTHROPIC_API_KEY"),
+        max_tokens = 1000,
+        temperature= 0
     )
 
     full_prompt = (
@@ -478,22 +560,30 @@ def query_policies(question: str) -> dict:
     response    = llm.invoke(messages)
     answer_text = response.content
 
-    # Step 8: Add NHS-specific warnings
     if review_warning:
         answer_text += review_warning
     if pathway_warning:
         answer_text += pathway_warning
 
-    # Step 9: Validate output
+    if analysis.get("use_fusion") and "📄 Note:" not in answer_text:
+        answer_text += (
+            "\n\n📄 Note: This answer is based on retrieved sections "
+            "of the policy. For the complete list please view the full "
+            "document using the citation link below."
+        )
+
     answer_text = validate_output(answer_text)
 
-    # Step 10: Audit log
+    cited_page     = extract_page_from_answer(answer_text, all_pages, primary_meta.get("page", ""))
+    confidence_pct = round((1 / (1 + math.exp(-confidence))) * 100, 1)
+
+    # Step 9: Audit log (GDPR compliant — hash only)
     log_query(
         query           = question,
         source_doc      = primary_meta.get("doc_title", ""),
         page            = primary_meta.get("page", 0),
         policy_ref      = primary_meta.get("policy_reference", ""),
-        confidence      = confidence,
+        confidence      = confidence_pct,
         response_length = len(answer_text),
         pathway         = primary_meta.get("pathway", "Pathway 1")
     )
@@ -502,7 +592,7 @@ def query_policies(question: str) -> dict:
         "answer":     answer_text,
         "source":     primary_meta.get("doc_title", ""),
         "reference":  primary_meta.get("policy_reference", ""),
-        "page":       extract_page_from_answer(answer_text, all_pages[0] if all_pages else primary_meta.get("page", "")),
+        "page":       cited_page,
         "version":    primary_meta.get("version", ""),
         "confidence": round(confidence, 3),
         "pathway":    primary_meta.get("pathway", ""),
@@ -528,11 +618,17 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
 
     test_questions = [
-        "What is UHP's policy on using ChatGPT?",
-        "Who must approve AI systems at UHP?",
-        "What is the process for reporting a patient safety incident?",
-        "What does DCB0129 require?",
-        "What are the data quality standards at UHP?",
+        # Should be BROAD → Fusion
+        "What are all the learning response methods?",
+        "Give me an overview of UHP's AI governance",
+        "What are the staff responsibilities for data quality?",
+        # Should be SPECIFIC → Hybrid
+        "Who is the Caldicott Guardian responsible to?",
+        "What is DTAC?",
+        "When must a DPIA be completed?",
+        # Edge cases
+        "What is the Information Governance Policy about?",
+        "How should staff handle a data breach?",
     ]
 
     # DIAGNOSTIC — direct ChromaDB search for ChatGPT content

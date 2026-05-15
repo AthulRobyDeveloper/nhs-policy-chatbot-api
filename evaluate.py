@@ -34,7 +34,7 @@ from datasets import Dataset
 from rag import (
     query_policies,
     hybrid_search,
-    rewrite_query,
+    analyse_and_rewrite,
     rerank,
     init_audit_db,
     _embeddings as _hf_embeddings,
@@ -503,8 +503,8 @@ def collect_rag_outputs(test_set: list) -> dict:
         try:
             result      = query_policies(question)
             answer      = result.get("answer", "")
-            rewritten   = rewrite_query(question)
-            docs        = hybrid_search(original=question, rewritten=rewritten)
+            analysis    = analyse_and_rewrite(question)
+            docs        = hybrid_search(original=question, rewritten=analysis.get("rewritten", question))
             top_docs, _ = rerank(question, docs)
             chunk_texts = [doc.page_content for doc in top_docs]
 

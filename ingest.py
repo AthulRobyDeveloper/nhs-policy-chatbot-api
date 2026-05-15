@@ -11,8 +11,8 @@ load_dotenv()
 POLICIES_DIR  = "policies"
 CHROMA_DIR    = "chroma_db"
 EMBED_MODEL   = "all-MiniLM-L6-v2"
-CHUNK_SIZE    = 800
-CHUNK_OVERLAP = 150
+CHUNK_SIZE    = 1200
+CHUNK_OVERLAP = 200
 
 # Full document registry with compliance metadata
 DOCUMENT_REGISTRY = {
