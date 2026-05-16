@@ -1,14 +1,36 @@
+# Core API
 fastapi
 uvicorn
+pydantic
+python-dotenv
+
+# LangChain
 langchain
 langchain-anthropic
 langchain-community
+langchain-chroma
+langchain-huggingface
+langchain-text-splitters
+
+# Vector store & embeddings
 chromadb
 sentence-transformers
+
+# Retrieval
+rank-bm25
+
+# PDF ingestion
 pymupdf
-python-dotenv
+
+# LLM
 anthropic
+
+# Evaluation
 ragas
-deepeval
+datasets
+
+# Monitoring
 langfuse
-pydantic
+
+# Utilities
+numpy
