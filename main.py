@@ -106,6 +106,7 @@ class PolicyResponse(BaseModel):
     confidence_label:    str
     pathway:             str
     pdf_url:             str
+    all_pages:           list
     timestamp:           str
     disclaimer:          str
 
@@ -226,6 +227,7 @@ async def ask_question(
         "confidence_label":   confidence_data["label"],
         "pathway":            result.get("pathway", ""),
         "pdf_url":            pdf_url,
+        "all_pages":          result.get("all_pages", []),
         "timestamp":          datetime.now().isoformat(),
         "disclaimer": (
             "This guidance is based on UHP policy documents. "

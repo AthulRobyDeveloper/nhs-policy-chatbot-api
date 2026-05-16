@@ -597,6 +597,7 @@ def query_policies(question: str) -> dict:
         "confidence": round(confidence, 3),
         "pathway":    primary_meta.get("pathway", ""),
         "pdf_file":   primary_meta.get("pdf_file", ""),
+        "all_pages":  sorted(set(p for p in all_pages if isinstance(p, int))),
         "error":      False
     }
 
